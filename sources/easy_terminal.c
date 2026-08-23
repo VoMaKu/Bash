@@ -11,6 +11,11 @@
 #include <limits.h>
 
 pid_t child; 	// PID ребенка
+int last_status = 0;	//код возврата последнего задания, по нему решается "&&"
+int and_flag = 0;	//задание закончилось на "&&", а не на одиночном "&"
+int append_flag = 0;	//файл открыт через ">>", а не через ">"
+int peeked = -1;	//символ, прочитанный на один вперёд и пока не использованный
+int eof_flag = 0;	//ввод закончился
 pid_t *children = NULL;	//PID всех звеньев текущей команды
 int chld_sz = 0;	//сколько их сейчас в массиве
 int stopflag = 0; 	// для завершения дочернего процесса SIGINT
@@ -66,14 +71,45 @@ void write_file(char *word, int append){	//если открывает 2ой ф�
 	}
 }
 
-char *get_word(char *end){
+int read_char(){	//чтение по одному символу с возможностью вернуть символ обратно
+	if (peeked != -1){
+		int c = peeked;
+		peeked = -1;
+		return c;
+	}
 	char c;
-	if (read(0, &c, sizeof(char)) < 0){
+	int n = read(0, &c, sizeof(char));
+	if (n == 0){
+		eof_flag = 1;
+		return -1;
+	}
+	if (n < 0){
 		perror("word was not read");
+		return -1;
+	}
+	return c;
+}
+
+int is_separator(int c){	//символы, которые сами по себе слово и всегда отделяются от соседей
+	return c == '|' || c == '&' || c == '<' || c == '>';
+}
+
+char *get_word(char *end){
+	append_flag = 0;
+	int c = read_char();
+	if (c == -1){
 		*end  = '\0';
 		return NULL;
 	}
-	if (c == '>' || c == '<'){	//проверка на открытие файла
+	if (is_separator(c)){	//разделитель разбираем целиком: ">>" и "&&" состоят из двух символов
+		int next = read_char();
+		if (c == '>' && next == '>'){
+			append_flag = 1;
+		} else if (c == '&' && next == '&'){
+			and_flag = 1;
+		} else if (next != -1){
+			peeked = next;	//разделитель оказался одиночным — заглянутый символ возвращаем в поток
+		}
 		*end = c;
 		return NULL;
 	}
@@ -81,22 +117,22 @@ char *get_word(char *end){
 	int array_size = 0;
 	int flg = 0;	// этот флаг нужен для проверок ковычек
 	if (c == '"'){
-		flg = 1;	
-		if (read(0, &c, sizeof(char)) < 0){
-			perror("word was not read");
+		flg = 1;
+		c = read_char();
+		if (c == -1){
 			*end  = '\0';
 			return NULL;
 		}
 	}
-	while (c != '\n' && ((c != ' ' && c != '\t' && c != '|') || flg)){	//всякие проверки, но окончанием команды всегда будет ENTER!!!
+	while (c != '\n' && ((c != ' ' && c != '\t' && !is_separator(c)) || flg)){	//всякие проверки, но окончанием команды всегда будет ENTER!!!
 		if (c == '"'){
-			if (read(0, &c, sizeof(char)) < 0){
-				perror("word was not read");
+			c = read_char();
+			if (c == -1){
 				free(array);
 				*end  = '\0';
 				return NULL;
-			}	
-			if(c != ' ' && c != '\n' && c != '|' && c != '\t'){	//если после ковычек не идет SPACE, TAB, PIPE или ENTER
+			}
+			if(c != ' ' && c != '\n' && c != '\t' && !is_separator(c)){	//если после ковычек не идет SPACE, TAB, ENTER или разделитель
 				free(array);
 				*end = '\0';
 				return NULL;
@@ -113,8 +149,9 @@ char *get_word(char *end){
 		}
 		array = temp_array;
 		array[array_size - 1] = c;
-		if (read(0, &c, sizeof(char)) < 0){
-			perror("word was not read");
+		c = read_char();
+		if (c == -1){
+			free(array);
 			*end  = '\0';
 			return NULL;
 		}
@@ -124,7 +161,12 @@ char *get_word(char *end){
 		*end = '\0';
 		return NULL;
 	}
-	*end = c;
+	if (is_separator(c)){	//слово упёрлось в разделитель — вернём его в поток, следующий вызов разберёт его целиком
+		peeked = c;
+		*end = ' ';
+	} else {
+		*end = c;
+	}
 	if (array == NULL){
 		return NULL;
 	}
@@ -140,39 +182,24 @@ char *get_word(char *end){
 	return array;
 }
 
+void skip_line(){	//после неудачной левой части "&&" остаток строки не выполняется
+	int c = read_char();
+	while (c != -1 && c != '\n'){
+		c = read_char();
+	}
+}
+
 char **get_list(char *symbol){
 	int arg_c = 0;
 	char **list = NULL, *word = NULL; 
 	*symbol = '\0';
-	while (*symbol != '\n' && *symbol != '|'){ // проверка на окончание команды или pipe
+	while (*symbol != '\n' && *symbol != '|' && *symbol != '&'){ // проверка на окончание команды, pipe или конец задания
 		word = get_word(&(*symbol));
-		if (word != NULL){	//если вдруг вернул ничего, то нужно проверить на ошибку или на заврешение команды(или пробел/таб в начале)
-			if (strcmp(word, "&") == 0){	//фоновый режим
-				free(word);
-				background = 1;
-				if (list == NULL){
-					return NULL;
-				}
-				char **temp_array = realloc(list, (arg_c + 1) * sizeof(char *)); //список тоже нужно закончить NULL, иначе execvp читает за его границей
-				if (temp_array == NULL){
-					perror("realloc error");
-					for (int i = 0; i < arg_c; i++){
-						free(list[i]);
-					}
-					free(list);
-					*symbol = '\0';
-					return NULL;
-				}
-				list = temp_array;
-				list[arg_c] = NULL;
-				return list;
-			}
-		}
 		if (*symbol == '<' || *symbol == '>'){ // проверка на открытие файла
 			char tmp = *symbol; // сохраняем нашу переменную
-			int append = 0;	// ">" или ">>"
+			int append = append_flag;	// ">" или ">>" — запоминаем до того, как следующий get_word перепишет флаг
 			word = get_word(&(*symbol)); // ищем наш файл, который нужно прочитать/ на который нужно записать
-			while (word == NULL && (*symbol != '\n' && *symbol != '|')){
+			while (word == NULL && (*symbol != '\n' && *symbol != '|' && *symbol != '&')){
 				if (word == NULL && *symbol == '\0'){ //если возникла ошибка при поиске имени файла, то завершаем
 					for (int i = 0; i < arg_c; i++){
 						free(list[i]);
@@ -188,12 +215,9 @@ char **get_list(char *symbol){
 					}
 					return NULL;
 				}
-				if (tmp == '>' && *symbol == '>'){	//второй ">" подряд — это дозапись
-					append = 1;
-				}
 				word = get_word(&(*symbol));	// продолжаем искать имя файла
 			}
-			if (word == NULL && (*symbol == '\n' || *symbol == '|')){	//если после > или < вдруг нажали на ENTER или поставили PIPE
+			if (word == NULL && (*symbol == '\n' || *symbol == '|' || *symbol == '&')){	//если после > или < вдруг нажали на ENTER, поставили PIPE или закончили задание
 				perror("name of file not found");
 				for (int i = 0; i < arg_c; i++){
 					free(list[i]);
@@ -250,7 +274,7 @@ char **get_list(char *symbol){
 				readflag = 0;
 			}
 			return NULL;
-		} else if (word == NULL && (*symbol == '\n' || *symbol == '|')){ // проверка на окончание команды, например: "ls\t\n" или "ls |"
+		} else if (word == NULL && (*symbol == '\n' || *symbol == '|' || *symbol == '&')){ // проверка на окончание команды, например: "ls\t\n" или "ls |"
 			break;
 		} else if (word == NULL && (*symbol == ' ' || *symbol == '\t')){ // проверка на SPACE или TAB
 			continue;
@@ -322,7 +346,7 @@ void clear_cmd(char ****cmd, int arg_c){ // очистка массива ука
 	free(*cmd);
 }
 
-char ***get_cmd(int *arg_c, int *err){
+char ***get_cmd(int *arg_c, int *err, char *sep){
 	*err = 0; //err == 1 - выход из программы, err == 0 - нормальное считывание, -err == -1 - считывание с ошибкой или пустой список
 	*arg_c = 0;
 	char symbol;
@@ -346,7 +370,7 @@ char ***get_cmd(int *arg_c, int *err){
 	}
 	cmd[0] = list;
 	(*arg_c)++;
-	while (symbol != '\n'){	// создание команд в цикле
+	while (symbol == '|'){	// звенья одного конвейера собираем в цикле
 		list = get_list(&symbol);
 		if (list == NULL && symbol == '\0'){
 			clear_cmd(&cmd, *arg_c);
@@ -365,6 +389,7 @@ char ***get_cmd(int *arg_c, int *err){
 		cmd[*arg_c] = list;
 		(*arg_c)++;
 	}
+	*sep = symbol;	//чем задание кончилось: концом строки, "&" или "&&"
 	return cmd;
 }
 
@@ -388,7 +413,7 @@ int mk_pipeline(int (**ppe)[2], int num){	//создание массивов pi
 	return 0;
 }
 
-void forget_children(void){	//сначала обнуляем размер, чтобы handler не пошёл по освобождённой памяти
+void forget_children(){	//сначала обнуляем размер, чтобы handler не пошёл по освобождённой памяти
 	chld_sz = 0;
 	free(children);
 	children = NULL;
@@ -476,7 +501,15 @@ void mk_chld_proc(char ***cmd, int arg_c){
 			close(ppe[i][1]);
 		}
 		if (background == 0){
-			wait(NULL);
+			int status = 0;
+			pid_t done = wait(&status);
+			if (done == children[arg_c - 1]){	//код возврата задания — это код его последнего звена
+				if (WIFEXITED(status)){
+					last_status = WEXITSTATUS(status);
+				} else {
+					last_status = 1;	//убит сигналом — считаем неудачей
+				}
+			}
 		} else {
 			bckgrd_count++;
 			char buf = '[';
@@ -538,18 +571,29 @@ void back_to_begin(char ****cmd, int arg_c){
 int main(){
 	signal(SIGINT, handler);
 	while (1){
-		int err = 0, arg_c = 0;
+		int err = 0;
+		char sep = '\n';
 		print();
-		char ***cmd = get_cmd(&arg_c, &err);
-		if (err == 1){
+		do {	//в одной строке может быть несколько заданий через "&" или "&&"
+			int arg_c = 0;
+			and_flag = 0;
+			char ***cmd = get_cmd(&arg_c, &err, &sep);
+			if (err == 1 || eof_flag){
+				back_to_begin(&cmd, arg_c);
+				return 0;
+			} else if (err == -1){
+				back_to_begin(NULL, 0);
+				break;
+			}
+			int and_then = and_flag;	//запоминаем до запуска: следующий разбор флаг перезапишет
+			background = (sep == '&' && and_then == 0);
+			mk_chld_proc(cmd, arg_c);
 			back_to_begin(&cmd, arg_c);
-			break;
-		} else if (err == -1){
-			back_to_begin(NULL, 0);
-			continue;
-		}
-		mk_chld_proc(cmd, arg_c);
-		back_to_begin(&cmd, arg_c);
+			if (and_then && last_status != 0){
+				skip_line();	//левая часть "&&" завершилась с ошибкой
+				break;
+			}
+		} while (sep == '&');
 	}
 	return 0;
 }

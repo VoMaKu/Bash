@@ -14,6 +14,8 @@ jobs and signal handling.
 | Append mode | `ls >> file.txt` |
 | Input redirection | `sort < input.txt > output.txt` |
 | Background jobs | `sleep 10 &` |
+| Several jobs on one line | `make & ls -a` |
+| Conditional chaining | `make && ./run` — the right side runs only if the left one succeeded |
 | Signal handling | `Ctrl+C` interrupts every stage of the pipeline, not the shell |
 | Built-in `cd` | `cd ..` |
 
@@ -26,6 +28,10 @@ make sources/easy_terminal
 
 Requires a C compiler and a POSIX system. Builds clean with `-Wall -Werror`;
 tested with gcc on Linux and clang on macOS.
+
+Operators do not need spaces around them: `ls>out.txt`, `ls|sort` and
+`make&&./run` parse the same as their spaced forms. Two-character operators are
+only recognised when written together — `a > > b` is a single `>`, not `>>`.
 
 ## Repository layout
 
