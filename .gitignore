@@ -1,0 +1,4 @@
+# build output — the Makefile compiles next to the sources
+sources/easy_terminal
+examples/demo_pipe
+examples/reader

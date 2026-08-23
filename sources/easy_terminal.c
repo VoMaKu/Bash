@@ -11,13 +11,20 @@
 #include <limits.h>
 
 pid_t child; 	// PID ребенка
+pid_t *children = NULL;	//PID всех звеньев текущей команды
+int chld_sz = 0;	//сколько их сейчас в массиве
 int stopflag = 0; 	// для завершения дочернего процесса SIGINT
 int background = 0;		//если есть фоновый процесс
+int bckgrd_count = 0;	//количество фоновых процессов
 int readfd = -1, writefd = -1;		//если открываем файл
 int readflag = 0, writeflag = 0;	//проверка на открытие файлов, проверка на ошибки
 
 void handler(int signal){	//убийца всех дочерних процессов
-	kill(child, SIGINT);
+	for (int i = 0; i < chld_sz; i++){
+		if (children[i] > 0){	//нулями заполнены звенья, которые ещё не запустились
+			kill(children[i], SIGINT);
+		}
+	}
 	stopflag = 1;
 }
 
@@ -27,7 +34,7 @@ void print(){ 	// стандартное приветствие
 	char* user = getenv("USER");
 	char host[256];
 	gethostname(host, 256);
-	printf("\x1b[1;31m%s@%s\x1b[0m:\x1b[34;1m%s\x1b[37;5m$\x1b[0m\n", user, host, pwd);
+	printf("\x1b[1;31m%s@%s\x1b[0m:\x1b[34;1m%s\x1b[37m$\x1b[0m\n", user, host, pwd);
 	fflush(stdout);
 }
 
@@ -42,9 +49,15 @@ void read_file(char *word){ 	//если открывается 2ой файл н
 	}
 }
 
-void write_file(char *word){	//если открывает 2ой файл на запись, то игнорит его
+void write_file(char *word, int append){	//если открывает 2ой файл на запись, то игнорит его
 	if (writefd == -1 && writeflag == 0){
-		writefd = open(word, O_CREAT | O_WRONLY | O_TRUNC, 0664);
+		int flags = O_CREAT | O_WRONLY;
+		if (append){
+			flags = flags | O_APPEND;	//">>" дописывает в конец
+		} else {
+			flags = flags | O_TRUNC;	//">" затирает содержимое
+		}
+		writefd = open(word, flags, 0664);
 		if (writefd < 0){
 			writeflag = 0;
 			return;
@@ -59,7 +72,7 @@ char *get_word(char *end){
 		perror("word was not read");
 		*end  = '\0';
 		return NULL;
-	}	
+	}
 	if (c == '>' || c == '<'){	//проверка на открытие файла
 		*end = c;
 		return NULL;
@@ -73,16 +86,18 @@ char *get_word(char *end){
 			perror("word was not read");
 			*end  = '\0';
 			return NULL;
-		}	
+		}
 	}
 	while (c != '\n' && ((c != ' ' && c != '\t' && c != '|') || flg)){	//всякие проверки, но окончанием команды всегда будет ENTER!!!
 		if (c == '"'){
 			if (read(0, &c, sizeof(char)) < 0){
 				perror("word was not read");
+				free(array);
 				*end  = '\0';
 				return NULL;
 			}	
 			if(c != ' ' && c != '\n' && c != '|' && c != '\t'){	//если после ковычек не идет SPACE, TAB, PIPE или ENTER
+				free(array);
 				*end = '\0';
 				return NULL;
 			}
@@ -102,9 +117,10 @@ char *get_word(char *end){
 			perror("word was not read");
 			*end  = '\0';
 			return NULL;
-		}	
+		}
 	}
 	if (flg){	//если мы не встретили закрывающиеся ковычки, то не позволяем пользователю вводить что-то дальше
+		free(array);
 		*end = '\0';
 		return NULL;
 	}
@@ -134,36 +150,34 @@ char **get_list(char *symbol){
 			if (strcmp(word, "&") == 0){	//фоновый режим
 				free(word);
 				background = 1;
-				return list;
-			}
-			if (*symbol == '<' || *symbol == '>'){ // проверка на открытие файла
-				char tmp = *symbol; // сохраняем нашу переменную
-				word = get_word(&(*symbol)); // ищем наш файл, который нужно прочитать/ на который нужно записать
-				while (word == NULL && (*symbol != '\n' && *symbol != '|')){
-					if (word == NULL && *symbol == '\0'){ //если возникла ошибка при поиске имени файла, то завершаем
-						for (int i = 0; i < arg_c; i++){
-							free(list[i]);
-						}
-						free(list);
-						if (writeflag){
-							close(writefd);
-							writeflag = 0;
-						}
-						if (readflag){
-							close(readfd);
-							readflag = 0;
-						}
-						return NULL;
-					}
-					word = get_word(&(*symbol));	// продолжаем искать имя файла
+				if (list == NULL){
+					return NULL;
 				}
-				if (word == NULL && (*symbol == '\n' || *symbol == '|')){	//если после > или < вдруг нажали на ENTER или поставили PIPE
-					perror("name of file not found");
+				char **temp_array = realloc(list, (arg_c + 1) * sizeof(char *)); //список тоже нужно закончить NULL, иначе execvp читает за его границей
+				if (temp_array == NULL){
+					perror("realloc error");
 					for (int i = 0; i < arg_c; i++){
 						free(list[i]);
 					}
 					free(list);
 					*symbol = '\0';
+					return NULL;
+				}
+				list = temp_array;
+				list[arg_c] = NULL;
+				return list;
+			}
+		}
+		if (*symbol == '<' || *symbol == '>'){ // проверка на открытие файла
+			char tmp = *symbol; // сохраняем нашу переменную
+			int append = 0;	// ">" или ">>"
+			word = get_word(&(*symbol)); // ищем наш файл, который нужно прочитать/ на который нужно записать
+			while (word == NULL && (*symbol != '\n' && *symbol != '|')){
+				if (word == NULL && *symbol == '\0'){ //если возникла ошибка при поиске имени файла, то завершаем
+					for (int i = 0; i < arg_c; i++){
+						free(list[i]);
+					}
+					free(list);
 					if (writeflag){
 						close(writefd);
 						writeflag = 0;
@@ -174,32 +188,53 @@ char **get_list(char *symbol){
 					}
 					return NULL;
 				}
-				if (tmp == '<'){
-					read_file(word);
-					if (readfd < 0 && readflag == 0){ // проверка, если файл не открылся на чтение
-						perror("file did not open");
-						*symbol = '\0';
-						for (int i = 0; i < arg_c; i++){
-							free(list[i]);
-						}
-						free(list);
-						return NULL;
-					}
-				} else {
-					write_file(word);
-					if (writeflag == 0 && writefd < 0){ // проверка, если файл не открылся на запись
-						perror("file did not open");
-						*symbol = '\0';
-						for (int i = 0; i < arg_c; i++){
-							free(list[i]);
-						}
-						free(list);
-						return NULL;
-					}
+				if (tmp == '>' && *symbol == '>'){	//второй ">" подряд — это дозапись
+					append = 1;
 				}
-				free(word);
-				word = NULL;
+				word = get_word(&(*symbol));	// продолжаем искать имя файла
 			}
+			if (word == NULL && (*symbol == '\n' || *symbol == '|')){	//если после > или < вдруг нажали на ENTER или поставили PIPE
+				perror("name of file not found");
+				for (int i = 0; i < arg_c; i++){
+					free(list[i]);
+				}
+				free(list);
+				*symbol = '\0';
+				if (writeflag){
+					close(writefd);
+					writeflag = 0;
+				}
+				if (readflag){
+					close(readfd);
+					readflag = 0;
+				}
+				return NULL;
+			}
+			if (tmp == '<'){
+				read_file(word);
+				if (readfd < 0 && readflag == 0){ // проверка, если файл не открылся на чтение
+					perror("file did not open");
+					*symbol = '\0';
+					for (int i = 0; i < arg_c; i++){
+						free(list[i]);
+					}
+					free(list);
+					return NULL;
+				}
+			} else {
+				write_file(word, append);
+				if (writeflag == 0 && writefd < 0){ // проверка, если файл не открылся на запись
+					perror("file did not open");
+					*symbol = '\0';
+					for (int i = 0; i < arg_c; i++){
+						free(list[i]);
+					}
+					free(list);
+					return NULL;
+				}
+			}
+			free(word);
+			word = NULL;
 		}
 		if (word == NULL && *symbol == '\0'){ // проверка на ошибку в get_word
 			for (int i = 0; i < arg_c; i++){
@@ -345,12 +380,18 @@ int mk_pipeline(int (**ppe)[2], int num){	//создание массивов pi
 				perror("pipe was not created");
 				close((*ppe)[i][0]);
 				close((*ppe)[i][1]);
-				free((*ppe)[i]);
 			}
+			free(ppe);
 			return -1;
 		}
 	}	
 	return 0;
+}
+
+void forget_children(void){	//сначала обнуляем размер, чтобы handler не пошёл по освобождённой памяти
+	chld_sz = 0;
+	free(children);
+	children = NULL;
 }
 
 void mk_chld_proc(char ***cmd, int arg_c){
@@ -364,14 +405,32 @@ void mk_chld_proc(char ***cmd, int arg_c){
 		return;
     }
 	int (*ppe)[2] = NULL;
-	int tmp = mk_pipeline(&ppe, arg_c - 1);
+	int const pipe_c = arg_c - 1;
+	int tmp = mk_pipeline(&ppe, pipe_c);
 	if (tmp == -1){
 		return;
 	}
+	children = calloc(arg_c, sizeof(pid_t));	//нули означают "звено ещё не запущено"
+	if (children == NULL){
+		perror("malloc error");
+		for (int i = 0; i < pipe_c; ++i){
+			close(ppe[i][0]);
+			close(ppe[i][1]);
+		}
+		free(ppe);
+		return;
+	}
+	chld_sz = arg_c;
 	for(int i = 0; i < arg_c; i++){
 		child = fork();
 		if (child == -1){
 			perror("fork failed");
+			for (int i = 0; i < pipe_c; ++i){
+				close(ppe[i][0]);
+				close(ppe[i][1]);
+			}
+			free(ppe);
+			forget_children();
 			return;
 		} else if (child == 0){
 			if (i == 0 && readflag == 1){
@@ -382,15 +441,15 @@ void mk_chld_proc(char ***cmd, int arg_c){
 				if (i != 0){
 					dup2(ppe[i - 1][0], 0);
 				}
-				if (i != arg_c - 1){
+				if (i != pipe_c){
 					dup2(ppe[i][1], 1);
 				}
 			}           
-			for (int j = 0; j < arg_c - 1; j++) {
+			for (int j = 0; j < pipe_c; j++) {
 				close(ppe[j][0]);
 				close(ppe[j][1]);
 			}
-			if (i == arg_c - 1 && writeflag == 1){
+			if (i == pipe_c && writeflag == 1){
 				dup2(writefd, 1);
 				close(writefd);
 			}
@@ -404,28 +463,63 @@ void mk_chld_proc(char ***cmd, int arg_c){
 				perror("exec failed");
 				exit(1);
 			}
-		} else {
-			signal(SIGINT, handler);
-			if (background == 0){
-				wait(NULL);
-			}
 		}
+		children[i] = child;	//звено запущено — теперь handler сможет его убить
 		if (stopflag == 1){
 			stopflag = 0;
 			break;
 		}
 	}
-	for (int i = 0; i < arg_c - 1; ++i)
-	{
-		close(ppe[i][0]);
-		close(ppe[i][1]);
-		free(ppe[i]);
+	for (int i = 0; i < arg_c; ++i){
+		if (i != pipe_c){	
+			close(ppe[i][0]);
+			close(ppe[i][1]);
+		}
+		if (background == 0){
+			wait(NULL);
+		} else {
+			bckgrd_count++;
+			char buf = '[';
+			write(1, &buf, sizeof(char));
+			int temp = bckgrd_count;
+			char digits[16];	//цифры набираются с конца, поэтому пишем их в обратном порядке
+			int digit_c = 0;
+			do {
+				digits[digit_c++] = temp % 10 + '0';
+				temp /= 10;
+			} while (temp != 0);
+			while (digit_c != 0){
+				buf = digits[--digit_c];
+				write(1, &buf, sizeof(char));
+			}
+			buf = ']';
+			write(1, &buf, sizeof(char));
+			buf = ' ';
+			write(1, &buf, sizeof(char));
+			pid_t temp_t = child;
+			digit_c = 0;
+			do {
+				digits[digit_c++] = temp_t % 10 + '0';
+				temp_t /= 10;
+			} while (temp_t != 0);
+			while (digit_c != 0){
+				buf = digits[--digit_c];
+				write(1, &buf, sizeof(char));
+			}
+			buf = '\n';
+			write(1, &buf, sizeof(char));
+			background = 0;
+		}
 	}
+	free(ppe);
+	forget_children();
 	return;
 }
 
 void back_to_begin(char ****cmd, int arg_c){
-	clear_cmd(cmd, arg_c);
+	if (cmd != NULL){
+		clear_cmd(cmd, arg_c);
+	}
 	if (writeflag){
 		close(writefd);
 	}
@@ -436,27 +530,22 @@ void back_to_begin(char ****cmd, int arg_c){
 	readfd = -1;
 	writeflag = 0;
 	readflag = 0;
+	stopflag = 0;
 	background = 0;
+	usleep(500000);	//полсекунды: sleep() принимает целые секунды и округлил бы до нуля
 }
 
 int main(){
+	signal(SIGINT, handler);
 	while (1){
 		int err = 0, arg_c = 0;
 		print();
 		char ***cmd = get_cmd(&arg_c, &err);
-/*		for (int i = 0; i < arg_c; i++){
-			for (int j = 0; cmd[i][j] != NULL; j++){
-				for (int k = 0; cmd[i][j][k]; k++){
-					putchar(cmd[i][j][k]);
-				}
-				putchar(' ');
-			}
-			putchar('|');
-		}
-		putchar('\n');*/
 		if (err == 1){
+			back_to_begin(&cmd, arg_c);
 			break;
 		} else if (err == -1){
+			back_to_begin(NULL, 0);
 			continue;
 		}
 		mk_chld_proc(cmd, arg_c);
