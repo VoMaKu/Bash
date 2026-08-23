@@ -1,101 +1,130 @@
 #include <sys/types.h>
-#include <sys/stat.h>
-#include <fcntl.h>
+#include <sys/wait.h>
 #include <unistd.h>
 #include <stdio.h>
-#include <errno.h>
-#include <sys/wait.h>
-#include <fcntl.h>
-#include <string.h>
 #include <stdlib.h>
 
-char *get_word(char *end){
-	char c = getchar();
+#define MAX_ARGS 16
+
+char *get_word(char *end){	//читает слово, в *end кладёт разделитель, на котором остановились
+	int c = getchar();
+	while (c == ' ' || c == '\t'){	//пропускаем отступы перед словом
+		c = getchar();
+	}
 	char *array = NULL;
 	int array_size = 0;
-	while (c != '\n' || c != ' ' || c != '\t' || c != '|'){
-		char *temp_array = realloc(array, (++array_size) * sizeof(char));
+	while (c != EOF && c != '\n' && c != ' ' && c != '\t' && c != '|'){
+		char *temp_array = realloc(array, (array_size + 1) * sizeof(char));
 		if (temp_array == NULL){
+			perror("realloc error");
 			free(array);
-			end = '\0';
+			*end = '\0';
 			return NULL;
 		}
 		array = temp_array;
-		array[array_size - 1] = c;
+		array[array_size] = c;
+		array_size++;
 		c = getchar();
 	}
-	*end = array[array_size - 1];
-	char *temp_array = realloc(array, (++array_size) * sizeof(char));
+	*end = (c == EOF) ? '\n' : c;
+	if (array == NULL){	//слова не было: сразу разделитель или конец ввода
+		return NULL;
+	}
+	char *temp_array = realloc(array, (array_size + 1) * sizeof(char));
 	if (temp_array == NULL){
+		perror("realloc error");
 		free(array);
-		end = '\0';
+		*end = '\0';
 		return NULL;
 	}
 	array = temp_array;
-	array[array_size - 1] = '\0';
+	array[array_size] = '\0';
 	return array;
 }
 
-int main(int argc, char **argv){
-	char *cmd_A[3] = {NULL, NULL, NULL}; 
-	char *cmd_B[3] = {NULL, NULL, NULL};
-	for (int i = 0; i < 2; i++)
-	{
-		char symbol = '\n';
-		while(symbol != '\n' || symbol != ' ')
-		cmd_A[i] = get_word(&symbol);
+char read_cmd(char **argv){	//собирает слова одной команды, список заканчивает NULL
+	int argc = 0;
+	char end = '\n';
+	while (argc < MAX_ARGS - 1){
+		char *word = get_word(&end);
+		if (word == NULL){
+			break;
+		}
+		argv[argc] = word;
+		argc++;
+		if (end == '\n' || end == '|' || end == '\0'){
+			break;
+		}
 	}
-	get_word(NULL); 
-	for (int i = 0; i < 2; i++)
-	{
-		char symbol = '\n';
-		while(symbol != '\n' || symbol != ' ' )
-		cmd_B[i] = get_word(&symbol);
+	argv[argc] = NULL;
+	return end;
+}
+
+void clear_cmd(char **argv){
+	for (int i = 0; argv[i] != NULL; i++){
+		free(argv[i]);
 	}
-	pid_t pid1, pid2;
+}
+
+int main(){
+	char *cmd_A[MAX_ARGS], *cmd_B[MAX_ARGS];
+	char end = read_cmd(cmd_A);
+	if (cmd_A[0] == NULL || end != '|'){
+		fprintf(stderr, "usage: type a line of the form \"command | command\"\n");
+		clear_cmd(cmd_A);
+		return 1;
+	}
+	read_cmd(cmd_B);
+	if (cmd_B[0] == NULL){
+		fprintf(stderr, "usage: type a line of the form \"command | command\"\n");
+		clear_cmd(cmd_A);
+		return 1;
+	}
 	int s1[2];
-	if (pipe(s1) == -1)
-	{
+	if (pipe(s1) == -1){
 		perror("s1 error");
+		clear_cmd(cmd_A);
+		clear_cmd(cmd_B);
 		return 100;
 	}
-	pid1 = fork();
+	pid_t pid1 = fork();
 	if (pid1 < 0){
 		perror("pid1");
 		return 90;
 	}
 	if (pid1 == 0){
 		dup2(s1[1], 1);
-		close(s1[1]);
 		close(s1[0]);
-		if (execve(cmd_A[0], cmd_A, NULL) < 0){
-			perror("execlp error");
-			return 80;
-		}
+		close(s1[1]);
+		execvp(cmd_A[0], cmd_A);
+		perror(cmd_A[0]);
+		_exit(80);
 	}
-	pid2 = fork();
+	pid_t pid2 = fork();
 	if (pid2 < 0){
 		perror("pid2");
 		return 60;
 	}
 	if (pid2 == 0){
+		dup2(s1[0], 0);	//без этого второй потомок не подключён к каналу и читает с клавиатуры
 		close(s1[0]);
 		close(s1[1]);
-		if (execve(cmd_B[0], cmd_B, NULL) < 0){
-			perror("execlp error");
-			return 50;
-		}
+		execvp(cmd_B[0], cmd_B);
+		perror(cmd_B[0]);
+		_exit(50);
 	}
 	close(s1[0]);
 	close(s1[1]);
 	int flag = 0;
-	for (int i = 0; i < 3; ++i){
+	for (int i = 0; i < 2; ++i){	//потомков двое
 		int status;
 		wait(&status);
 		if(!(WIFEXITED(status) && WEXITSTATUS(status) == 0)){
 			flag++;
 		}
 	}
+	clear_cmd(cmd_A);
+	clear_cmd(cmd_B);
 	if (flag){
 		return 20;
 	}
