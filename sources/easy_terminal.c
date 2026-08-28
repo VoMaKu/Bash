@@ -372,9 +372,9 @@ char ***get_cmd(int *arg_c, int *err, char *sep){
 	(*arg_c)++;
 	while (symbol == '|'){	// звенья одного конвейера собираем в цикле
 		list = get_list(&symbol);
-		if (list == NULL && symbol == '\0'){
+		if (list == NULL){	//звено пустое или разобрано с ошибкой — отменяем задание, но не выходим из шелла
 			clear_cmd(&cmd, *arg_c);
-			*err = 1;
+			*err = -1;
 			return NULL;
 		}
 		char ***temp_array = realloc(cmd, ((*arg_c) + 1) * sizeof(char **));
@@ -394,19 +394,24 @@ char ***get_cmd(int *arg_c, int *err, char *sep){
 }
 
 int mk_pipeline(int (**ppe)[2], int num){	//создание массивов pipe
-	*ppe = malloc(num * 2 * sizeof(int *));
-	if (ppe == NULL){
+	if (num == 0){	//одна команда без конвейера — каналы не нужны
+		*ppe = NULL;
+		return 0;
+	}
+	*ppe = malloc(num * 2 * sizeof(int));
+	if (*ppe == NULL){	//проверять надо сам массив, а не адрес указателя на него
 		perror("malloc error with pipe");
 		return -1;
 	}
 	for (int i = 0; i < num; ++i){
 		if (pipe((*ppe)[i]) == -1){
-			for (int j = 0; j < i; j++){
-				perror("pipe was not created");
-				close((*ppe)[i][0]);
-				close((*ppe)[i][1]);
+			perror("pipe was not created");
+			for (int j = 0; j < i; j++){	//закрываем те каналы, которые успели открыться
+				close((*ppe)[j][0]);
+				close((*ppe)[j][1]);
 			}
-			free(ppe);
+			free(*ppe);
+			*ppe = NULL;
 			return -1;
 		}
 	}	
@@ -495,12 +500,12 @@ void mk_chld_proc(char ***cmd, int arg_c){
 			break;
 		}
 	}
-	for (int i = 0; i < arg_c; ++i){
-		if (i != pipe_c){	
-			close(ppe[i][0]);
-			close(ppe[i][1]);
-		}
-		if (background == 0){
+	for (int i = 0; i < pipe_c; ++i){	//каналы закрываем все сразу: пока родитель держит конец, читатель не увидит EOF
+		close(ppe[i][0]);
+		close(ppe[i][1]);
+	}
+	if (background == 0){
+		for (int i = 0; i < arg_c; ++i){	//ждём все звенья конвейера, а не одно
 			int status = 0;
 			pid_t done = wait(&status);
 			if (done == children[arg_c - 1]){	//код возврата задания — это код его последнего звена
@@ -510,39 +515,39 @@ void mk_chld_proc(char ***cmd, int arg_c){
 					last_status = 1;	//убит сигналом — считаем неудачей
 				}
 			}
-		} else {
-			bckgrd_count++;
-			char buf = '[';
-			write(1, &buf, sizeof(char));
-			int temp = bckgrd_count;
-			char digits[16];	//цифры набираются с конца, поэтому пишем их в обратном порядке
-			int digit_c = 0;
-			do {
-				digits[digit_c++] = temp % 10 + '0';
-				temp /= 10;
-			} while (temp != 0);
-			while (digit_c != 0){
-				buf = digits[--digit_c];
-				write(1, &buf, sizeof(char));
-			}
-			buf = ']';
-			write(1, &buf, sizeof(char));
-			buf = ' ';
-			write(1, &buf, sizeof(char));
-			pid_t temp_t = child;
-			digit_c = 0;
-			do {
-				digits[digit_c++] = temp_t % 10 + '0';
-				temp_t /= 10;
-			} while (temp_t != 0);
-			while (digit_c != 0){
-				buf = digits[--digit_c];
-				write(1, &buf, sizeof(char));
-			}
-			buf = '\n';
-			write(1, &buf, sizeof(char));
-			background = 0;
 		}
+	} else {
+		bckgrd_count++;
+		char buf = '[';
+		write(1, &buf, sizeof(char));
+		int temp = bckgrd_count;
+		char digits[16];	//цифры набираются с конца, поэтому пишем их в обратном порядке
+		int digit_c = 0;
+		do {
+			digits[digit_c++] = temp % 10 + '0';
+			temp /= 10;
+		} while (temp != 0);
+		while (digit_c != 0){
+			buf = digits[--digit_c];
+			write(1, &buf, sizeof(char));
+		}
+		buf = ']';
+		write(1, &buf, sizeof(char));
+		buf = ' ';
+		write(1, &buf, sizeof(char));
+		pid_t temp_t = children[arg_c - 1];	//отчитываемся PID последнего звена конвейера
+		digit_c = 0;
+		do {
+			digits[digit_c++] = temp_t % 10 + '0';
+			temp_t /= 10;
+		} while (temp_t != 0);
+		while (digit_c != 0){
+			buf = digits[--digit_c];
+			write(1, &buf, sizeof(char));
+		}
+		buf = '\n';
+		write(1, &buf, sizeof(char));
+		background = 0;
 	}
 	free(ppe);
 	forget_children();
