@@ -2,3 +2,4 @@
 sources/easy_terminal
 examples/demo_pipe
 examples/reader
+examples/catcher

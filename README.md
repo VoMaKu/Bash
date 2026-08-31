@@ -39,9 +39,23 @@ only recognised when written together — `a > > b` is a single `>`, not `>>`.
 sources/     easy_terminal.c — the shell
 examples/    demo_pipe.c — one pipe between two commands
              reader.c — read a command line and execute it
+             catcher.c — catches SIGINT instead of dying, used by test.sh
 test.ch      a handful of command lines used to exercise the parser by hand
+test.sh      builds everything and checks that Ctrl+C reaches the child
 ```
 
-The two programs in `examples/` are the pieces the shell grew out of, kept as
-the smallest working illustration of each mechanism. Build them the same way:
+`demo_pipe` and `reader` are the pieces the shell grew out of, kept as the
+smallest working illustration of each mechanism. Build them the same way:
 `make examples/demo_pipe`.
+
+## Tests
+
+```sh
+sh test.sh
+```
+
+Builds every target with `-Wall -Werror`, then checks signal handling: that
+`examples/catcher` survives `SIGINT` on its own, that `Ctrl+C` sent to the shell
+reaches the running child while the shell itself stays alive, and that the
+program still works at `-O0`, `-O2` and `-O3`. Exits non-zero if anything fails.
+Verified on macOS (clang) and Ubuntu 26.04 (gcc 15).
