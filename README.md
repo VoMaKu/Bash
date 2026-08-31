@@ -54,8 +54,17 @@ smallest working illustration of each mechanism. Build them the same way:
 sh test.sh
 ```
 
-Builds every target with `-Wall -Werror`, then checks signal handling: that
-`examples/catcher` survives `SIGINT` on its own, that `Ctrl+C` sent to the shell
-reaches the running child while the shell itself stays alive, and that the
-program still works at `-O0`, `-O2` and `-O3`. Exits non-zero if anything fails.
-Verified on macOS (clang) and Ubuntu 26.04 (gcc 15).
+Builds every target with `-Wall -Werror`, then runs two groups of checks.
+
+Signal handling: `examples/catcher` survives `SIGINT` on its own, `Ctrl+C` sent
+to the shell reaches the running child while the shell itself stays alive, and
+the program still works at `-O0`, `-O2` and `-O3`.
+
+Shell features: pipes, `>`, `>>`, `<`, operators without spaces, two jobs on one
+line, both sides of `&&` (including that the right side is skipped after a
+failure), and that `&` does not block the shell. Each command redirects into a
+file and the file is compared against the expected text, so the prompt the shell
+prints does not get in the way.
+
+Exits non-zero if anything fails. Verified on macOS (clang) and Ubuntu 26.04
+(gcc 15). Takes about 20 seconds — the background and `-O` checks sleep.

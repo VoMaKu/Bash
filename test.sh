@@ -80,5 +80,56 @@ for O in -O0 -O2 -O3; do
 	fi
 done
 
+# E: возможности самого шелла. Команды пишут в файлы через перенаправление,
+# иначе вывод смешался бы с приглашением, которое шелл печатает в stdout
+echo "-- E: пайпы, перенаправления, && , фон --"
+sh_bin="$root/sources/easy_terminal"
+work="$tmp/work"
+mkdir -p "$work"
+printf 'one\ntwo\n' > "$work/in.txt"
+( cd "$work" && "$sh_bin" >/dev/null 2>&1 ) <<'CMDS'
+echo hello | tr a-z A-Z > pipe.out
+echo one > redir.out
+echo two >> redir.out
+sort < in.txt | uniq | tr a-z A-Z > chain.out
+true && echo yes > and_ok.out
+false && echo no > and_skip.out
+echo tight>nospace.out
+echo a > job1.out & echo b > job2.out
+CMDS
+
+expect() {	# expect <что проверяем> <ожидаемое, строки через /> <файл>
+	got=$(tr '\n' '/' < "$work/$3" 2>/dev/null)
+	if [ "$got" = "$2" ]; then
+		echo "  OK    $1"
+	else
+		echo "  FAIL  $1: ждали [$2], получили [$got]"; fail=1
+	fi
+}
+
+expect "пайп"                  "HELLO/"     pipe.out
+expect "> и >>"                "one/two/"   redir.out
+expect "< и цепочка из трёх"   "ONE/TWO/"   chain.out
+expect "true && — правая часть выполнилась" "yes/" and_ok.out
+expect "оператор без пробелов" "tight/"     nospace.out
+expect "две задачи в строке (1)" "a/"       job1.out
+expect "две задачи в строке (2)" "b/"       job2.out
+
+if [ -e "$work/and_skip.out" ]; then
+	echo "  FAIL  false && — правая часть выполнилась, хотя не должна была"; fail=1
+else
+	echo "  OK    false && — правая часть пропущена"
+fi
+
+# фон проверяем по времени: с "&" шелл не должен ждать sleep
+started=$(date +%s)
+printf 'sleep 6 &\n' | "$sh_bin" >/dev/null 2>&1
+elapsed=$(( $(date +%s) - started ))
+if [ "$elapsed" -lt 4 ]; then
+	echo "  OK    фон: шелл не стал ждать sleep 6 ($elapsed c)"
+else
+	echo "  FAIL  фон: шелл прождал $elapsed c, значит выполнил на переднем плане"; fail=1
+fi
+
 [ "$fail" -eq 0 ] && echo "ИТОГ: всё прошло" || echo "ИТОГ: есть падения"
 exit "$fail"
